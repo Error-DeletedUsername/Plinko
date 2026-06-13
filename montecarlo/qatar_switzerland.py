@@ -61,7 +61,8 @@ CFG = {
     "corners": {"fav": 5.5, "dog": 2.8},
     "fouls":   {"fav": 9.8, "dog": 12.8},  # Qatar fouls more, chasing the ball
     "cards":   {"fav": 1.3, "dog": 1.8},   # deliberately elevated; keep as-is
-    "offsides":{"fav": 1.3, "dog": 1.0},
+    "offsides":{"fav": 1.6, "dog": 1.0},  # fav raised 1.3->1.6: parks in final
+                                          # third vs weak side, volume-driven
 
     # Half-split fractions (first-half share) and trailing-team 2nd-half push.
     "split_goals_h1":   0.45,
@@ -77,9 +78,10 @@ CFG = {
     # Goal-model grid search.
     "grid_goals_max": 12,
     "reg_weight": 0.012,  # small pull toward input xG
-    "lam_grid": np.round(np.arange(1.40, 3.01, 0.05), 2),
-    "mu_grid":  np.round(np.arange(0.15, 1.21, 0.05), 2),
-    "rho_grid": np.round(np.arange(-0.20, 0.201, 0.02), 3),
+    "lam_grid": np.round(np.arange(1.40, 3.01, 0.10), 2),  # coarse; fine pass refines
+    "mu_grid":  np.round(np.arange(0.15, 1.21, 0.10), 2),
+    "rho_grid": np.round(np.arange(-0.20, 0.201, 0.05), 3),
+    "rho_cap": 0.20,      # ceiling for the fine refinement pass
 
     # Player props: (per-90 SOT rate, expected minutes).
     "afif":  {"per90": 0.55, "minutes": 85, "side": "dog"},  # creator, not shooter
@@ -128,30 +130,50 @@ def wdl_from_pmf(P):
     return fav, draw, dog
 
 
-def anchor_goal_model(cfg):
+def _grid_search(lam_arr, mu_arr, rho_arr, cfg, px_cache):
+    """Search a (lambda, mu, rho) box for the best market+xG fit."""
     kmax = cfg["grid_goals_max"]
     tgt = cfg["market_wdl"]
     reg = cfg["reg_weight"]
+    rho_cap = cfg["rho_cap"]
     best = None
-    for lmbda in cfg["lam_grid"]:
-        px = _poisson_pmf_vec(lmbda, kmax)
-        for mu in cfg["mu_grid"]:
-            py = _poisson_pmf_vec(mu, kmax)
+    for lmbda in lam_arr:
+        px = px_cache.get(lmbda)
+        if px is None:
+            px = px_cache[lmbda] = _poisson_pmf_vec(lmbda, kmax)
+        reg_lam = reg * (lmbda - cfg["xg_fav"]) ** 2
+        for mu in mu_arr:
+            py = px_cache.get(-mu)
+            if py is None:
+                py = px_cache[-mu] = _poisson_pmf_vec(mu, kmax)
             base = np.outer(px, py)
-            for rho in cfg["rho_grid"]:
-                P = base * _dc_tau(lmbda, mu, rho, kmax)
-                s = P.sum()
-                if s <= 0:
+            reg_mu = reg * (mu - cfg["xg_dog"]) ** 2
+            for rho in rho_arr:
+                if rho > rho_cap:
                     continue
-                P = np.clip(P, 0.0, None)
+                P = np.clip(base * _dc_tau(lmbda, mu, rho, kmax), 0.0, None)
                 P /= P.sum()
                 f, d, g = wdl_from_pmf(P)
                 loss = ((f - tgt["fav"]) ** 2 + (d - tgt["draw"]) ** 2 +
-                        (g - tgt["dog"]) ** 2 +
-                        reg * ((lmbda - cfg["xg_fav"]) ** 2 + (mu - cfg["xg_dog"]) ** 2))
+                        (g - tgt["dog"]) ** 2 + reg_lam + reg_mu)
                 if best is None or loss < best[0]:
                     best = (loss, lmbda, mu, rho)
-    _, lmbda, mu, rho = best
+    return best
+
+
+def anchor_goal_model(cfg):
+    """Coarse-to-fine grid search: cheap coarse pass, then refine the local box.
+    Same optimum as a dense sweep, a fraction of the iterations."""
+    kmax = cfg["grid_goals_max"]
+    px_cache = {}
+    # Coarse pass.
+    _, lmbda, mu, rho = _grid_search(cfg["lam_grid"], cfg["mu_grid"],
+                                     cfg["rho_grid"], cfg, px_cache)
+    # Fine pass around the coarse optimum (each window spans a full coarse step).
+    lam_f = np.round(np.arange(lmbda - 0.05, lmbda + 0.051, 0.0125), 4)
+    mu_f = np.round(np.arange(max(0.05, mu - 0.05), mu + 0.051, 0.0125), 4)
+    rho_f = np.round(np.arange(rho - 0.03, rho + 0.0301, 0.005), 4)
+    _, lmbda, mu, rho = _grid_search(lam_f, mu_f, rho_f, cfg, px_cache)
     P = dc_joint_pmf(lmbda, mu, rho, kmax)
     return lmbda, mu, rho, P
 
@@ -288,6 +310,11 @@ def simulate(cfg, verbose=False):
         "lambda": lmbda, "mu": mu, "rho": rho,
         "wdl": wdl_from_pmf(P),
         "sot_scale": sot_scale,
+        "drivers": {
+            # Q1 driver: the binding leg is Qatar getting 1+ SOT in the 1st half.
+            "qatar_1plus_sot_h1": (sot_d_h1 >= 1).mean(),
+            "swiss_1plus_sot_h1": (sot_f_h1 >= 1).mean(),
+        },
         "calib": {
             "sot_combined": (sot_f + sot_d).mean(),
             "corners_combined": (corners_f + corners_d).mean(),
@@ -338,6 +365,14 @@ def print_report(cfg):
     print(f"  Cards combined : {c['cards_combined']:.2f}   (norm ~{WC_NORMS['cards']}; kept elevated by design)")
     print(f"  Offsides fav/dog: {c['offsides_fav']:.2f} / {c['offsides_dog']:.2f}")
     print(f"  Goals fav/dog  : {c['goals_fav']:.2f} / {c['goals_dog']:.2f}")
+
+    # Q1 driver
+    dr = diag["drivers"]
+    print("\nQ1 DRIVER (which leg is binding)")
+    qd = dr["qatar_1plus_sot_h1"]
+    print(f"  Qatar P(1+ SOT in 1st half) : {100*qd:5.1f}%"
+          f"{'  -> below 50%, Q1 sits under a coin flip' if qd < 0.50 else ''}")
+    print(f"  Switzerland P(1+ SOT in 1st half) : {100*dr['swiss_1plus_sot_h1']:5.1f}%")
 
     # Prop questions
     print("\nPROP PROBABILITIES (with 95% CI)")
