@@ -319,21 +319,52 @@ sub1 <- sprintf("Each dot = one player | >=%d season mins, >=%d min post-card",
 sub2 <- "Baseline excludes booked matches"
 
 # ------------------------------------------------------------
-# 8. THE FOUR GRAPHS
+# 8. THE FOUR GRAPHS  (+ combined panel) -> 300 dpi PNGs
 # ------------------------------------------------------------
-dot_plot(cdm_players_all, "d_win",
+FIG_DIR <- "C:/Users/milot/Moneyball Project/figures"
+dir.create(FIG_DIR, showWarnings = FALSE, recursive = TRUE)
+
+p1 <- dot_plot(cdm_players_all, "d_win",
          "La Liga CDMs: ground-duel win rate before vs after a first yellow",
          sub1, "win-rate change after first yellow (percentage points)", pct = TRUE)
 
-dot_plot(cdm_vs_clean, "after_vs_clean",
+p2 <- dot_plot(cdm_vs_clean, "after_vs_clean",
          "La Liga CDMs: post-card duel win rate vs their own season norm",
          sub2, "post-card win rate minus own season baseline (percentage points)",
          pct = TRUE)
 
-dot_plot(cdm_vol, "d_p90",
+p3 <- dot_plot(cdm_vol, "d_p90",
          "La Liga CDMs: duel volume before vs after a first yellow",
          sub1, "change in ground duels per 90 (after - before)")
 
-dot_plot(cdm_vol, "after_vs_season",
+p4 <- dot_plot(cdm_vol, "after_vs_season",
          "La Liga CDMs: post-card duel volume vs their own season norm",
          sub2, "post-card duels per 90 minus own season baseline")
+
+print(p1); print(p2); print(p3); print(p4)
+
+ggsave(file.path(FIG_DIR, "1_winrate_after_vs_before.png"),  p1,
+       width = 9, height = 4.5, dpi = 300, bg = "white")
+ggsave(file.path(FIG_DIR, "2_winrate_vs_season_norm.png"),   p2,
+       width = 9, height = 4.5, dpi = 300, bg = "white")
+ggsave(file.path(FIG_DIR, "3_duelvolume_after_vs_before.png"), p3,
+       width = 9, height = 4.5, dpi = 300, bg = "white")
+ggsave(file.path(FIG_DIR, "4_duelvolume_vs_season_norm.png"), p4,
+       width = 9, height = 4.5, dpi = 300, bg = "white")
+
+# figure 5: all four together in a 2x2 panel
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  p5 <- patchwork::wrap_plots(p1, p2, p3, p4, ncol = 2)
+  ggsave(file.path(FIG_DIR, "5_all_four_panel.png"), p5,
+         width = 16, height = 9, dpi = 300, bg = "white")
+} else if (requireNamespace("gridExtra", quietly = TRUE)) {
+  png(file.path(FIG_DIR, "5_all_four_panel.png"),
+      width = 16, height = 9, units = "in", res = 300, bg = "white")
+  gridExtra::grid.arrange(p1, p2, p3, p4, ncol = 2)
+  dev.off()
+} else {
+  message("Install 'patchwork' (or 'gridExtra') to also get the combined ",
+          "2x2 panel: install.packages(\"patchwork\")")
+}
+
+cat("Figures saved to:", FIG_DIR, "\n")
